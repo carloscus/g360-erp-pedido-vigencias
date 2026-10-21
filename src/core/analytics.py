@@ -1706,6 +1706,72 @@ class PedidosAnalytics:
                 "si_se_aprueba": g["_val_aprob"].sum(),
             }
         )
+        # "Proximo al cierre" con numeros: cuantos SKU faltan y cuales.
+        # No basta con un porcentaje: el vendedor necesita saber QUE falta
+        # y CUANTAS unidades, para poder resolverlo.
+        if "_falt" in df.columns and "SKU" in df.columns:
+            _sku_col = df["SKU"].astype(str)
+            _falt_pos = df["_falt"].clip(lower=0)
+            _tiene_falt = _falt_pos > 0
+            out["skus_faltantes"] = (
+                _tiene_falt.groupby(df[id_col], dropna=False).sum().astype(int)
+            )
+            out["unidades_faltantes"] = (
+                _falt_pos.groupby(df[id_col], dropna=False).sum().round(0)
+            )
+
+            def _detalle_faltantes(pid) -> str:
+                """SKU:unidades de lo que falta (max 6, con '...' si hay mas)."""
+                sub = df[(df[id_col] == pid) & _tiene_falt]
+                if sub.empty:
+                    return ""
+                partes = []
+                for _s, _f in zip(
+                    _sku_col[_tiene_falt].values, _falt_pos[_tiene_falt].values
+                ):
+                    partes.append(f"{_s}:{int(_f)}")
+                partes = sorted(partes)
+                if len(partes) > 6:
+                    return "; ".join(partes[:6]) + f"; +{len(partes) - 6} mas"
+                return "; ".join(partes)
+
+            out["detalle_faltantes"] = out.index.to_series().map(_detalle_faltantes)
+        else:
+            out["skus_faltantes"] = 0
+            out["unidades_faltantes"] = 0.0
+            out["detalle_faltantes"] = ""
+        # "Proximo al cierre" con numeros: cuantos SKU faltan y cuales.
+        # No basta con un porcentaje: el vendedor necesita saber QUE falta
+        # y CUANTAS unidades, para poder resolverlo.
+        if "_falt" in df.columns and "SKU" in df.columns:
+            _sku_col = df["SKU"].astype(str)
+            _falt_pos = df["_falt"].clip(lower=0)
+            _tiene_falt = _falt_pos > 0
+            out["skus_faltantes"] = (
+                _tiene_falt.groupby(df[id_col], dropna=False).sum().astype(int)
+            )
+            out["unidades_faltantes"] = (
+                _falt_pos.groupby(df[id_col], dropna=False).sum().round(0)
+            )
+
+            def _detalle_faltantes(pid) -> str:
+                """SKU:unidades de lo que falta (最多 6, con '...' si hay mas)."""
+                sub = df[(df[id_col] == pid) & _tiene_falt]
+                if sub.empty:
+                    return ""
+                partes = []
+                for _s, _f in zip(_sku_col[_tiene_falt].values, _falt_pos[_tiene_falt].values):
+                    partes.append(f"{_s}:{int(_f)}")
+                partes = sorted(partes)
+                if len(partes) > 6:
+                    return "; ".join(partes[:6]) + f"; +{len(partes) - 6} mas"
+                return "; ".join(partes)
+
+            out["detalle_faltantes"] = out.index.to_series().map(_detalle_faltantes)
+        else:
+            out["skus_faltantes"] = 0
+            out["unidades_faltantes"] = 0.0
+            out["detalle_faltantes"] = ""
         # Segmentos visibles a nivel pedido (para filtrar sin partir el libro)
         for col, nombre in (
             ("linea", "lineas"),
