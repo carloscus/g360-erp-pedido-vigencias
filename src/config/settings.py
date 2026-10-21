@@ -30,6 +30,15 @@ PRIMARY_CATEGORIES = ["VINIBALL", "VINIFAN", "REPRESENTADAS"]
 # VES = Centro Logistico Principal, 121 = QC (espera liberacion)
 ALMACENES_PRIORIDAD = ["VES", "121", "40", "129"]
 
+# Almacen 121 (QC / produccion terminada): solo tiene `disponible`, NO hay
+# predespacho que descontar. Regla de observacion: si el stock disponible
+# en 121 supera este numero de CAJAS (no unidades), el traslado se marca
+# para REVISION (conteo fisico) ademas de trasladable.
+# Cajas = stock_121 / un_bx (el factor de empaque varia por SKU).
+UMBRAL_CAJAS_121_OBSERVACION = float(
+    os.environ.get("G360_UMBRAL_CAJAS_121_OBSERVACION", "1")
+)
+
 # Umbral de alerta QC: SKUs con saldo > este valor (units) en VES generan alerta
 ALERTA_QC_THRESHOLD = int(os.environ.get("G360_ALERTA_QC_THRESHOLD", "5000"))
 

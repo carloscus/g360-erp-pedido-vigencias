@@ -316,6 +316,46 @@ class Ingester:
     # ---------------------------------------------------------------
     # Enrichment con stock API
     # ---------------------------------------------------------------
+    def _apply_stock_cache(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Aplica el CACHE local de stock (sin tocar la red).
+
+        Es el camino de `--sin-stock`: el cache ya tiene la foto de stock
+        por SKU/almacen, pero ese camino NO debe perder la clasificacion
+        VES/121/otros. Antes, sin llamar a `enrich_with_stock_api` el
+        `stock_api_121` quedaba en 0 para todo y la hoja TRASLADO_121
+        salia vacia (ej: SKU 72014 con 121=100,224 y VES=0 no aparecia).
+
+        Aplica el mismo pipeline que `enrich_with_stock_api` pero sin
+        refrescar desde Render:
+          1. `stock_api_disponible` desde el cache
+          2. taxonomia desde el catalogo cacheado (Render)
+          3. clasificacion VES/121/otros (`_classify_stock`)
+          4. cobertura, relevancia y prototipo
+        """
+        if "SKU" not in df.columns:
+            return df
+        results = self._load_stock_cache(ignore_ttl=True)
+        catalog = self._load_render_catalog()
+        if not results:
+            # Cache vacio o vencido: sin stock, pero se deja el pipeline
+            # completo (cobertura 0) para que el reporte sea consistente.
+            df["stock_api_disponible"] = df["SKU"].map(lambda s: {})
+            df["sin_stock_api"] = True
+        else:
+            df["stock_api_disponible"] = df["SKU"].map(lambda s: results.get(s) or {})
+            df["sin_stock_api"] = df["stock_api_disponible"].apply(
+                lambda d: isinstance(d, dict) and not d
+            )
+            df = self._apply_render_catalog(df, catalog)
+            # La categoria comercial es funcion de la linea.
+            df = self.enrich_categorias_por_linea(df)
+        # Clasificacion VES/121/otros + cobertura (mismo camino que la red).
+        df = self._classify_stock(df)
+        df = self._recompute_relevance(df)
+        df = self._apply_prototipo(df)
+        df = self.normalizar_lineas(df)
+        return df
+
     def enrich_with_stock_api(
         self,
         df: pd.DataFrame,
@@ -995,13 +1035,22 @@ class Ingester:
         except (OSError, ValueError, TypeError):
             return None
 
-    def _load_stock_cache(self) -> dict[str, dict]:
+    def _load_stock_cache(self, ignore_ttl: bool = False) -> dict[str, dict]:
+        """Cache local de stock. `ignore_ttl=True` lo usa aunque este viejo.
+
+        El camino `--sin-stock` (reporte offline) necesita el snapshot
+        cacheado aunque haya pasado el TTL: es la unica foto de stock
+        disponible y el reporte avisa de su antiguedad en el PANEL.
+        """
+        # Un cache ya cargado en memoria manda: `ignore_ttl` solo decide si
+        # se acepta el de DISCO cuando esta vencido.
         if self._stock_cache is not None:
             return self._stock_cache
         try:
             with open(DATA_DIR / "stock_cache.json", encoding="utf-8") as f:
                 payload = json.load(f)
-            if time.time() - float(payload.get("ts", 0)) <= CACHE_TTL:
+            vigente = time.time() - float(payload.get("ts", 0)) <= CACHE_TTL
+            if vigente or ignore_ttl:
                 self._stock_cache = payload.get("stock", {})
                 self._render_catalog = payload.get("catalog", {}) or {}
             else:

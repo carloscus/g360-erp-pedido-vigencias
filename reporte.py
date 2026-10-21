@@ -219,6 +219,11 @@ def main(argv: list[str] | None = None) -> int:
             print("[1b/4] Maestro de productos del ERP: no encontrado (peso/EAN solo de Render)")
     df = ing.compute_derived(df)
     if args.sin_stock:
+        # El cache local YA tiene la foto de stock por SKU/almacen: se
+        # aplica y se clasifica (VES/121/otros) para no perder los traslados.
+        # Antes, este camino saltaba `enrich_with_stock_api` completo y
+        # `stock_api_121` quedaba en 0 -> TRASLADO_121 salia vacia.
+        df = ing._apply_stock_cache(df)
         print("[2/4] Saltando refresh de stock (usa cache).")
     else:
         print("[2/4] Consultando catalogo y stock de Render (puede tardar) ...")
