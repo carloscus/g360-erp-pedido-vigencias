@@ -1,0 +1,31 @@
+[project]
+name = "g360-erp-pedido-vigencias"
+version = "0.1.0"
+description = "Dashboard Flet desktop para analisis de vigencias de pedidos CIPSA"
+requires-python = ">=3.10"
+dependencies = [
+    "flet[desktop]",
+    "pandas",
+    "xlrd",
+    "openpyxl",
+    "requests",
+    "pydantic-settings",
+]
+
+[project.scripts]
+g360-pedido-vigencias = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# BLE001/S110: degradacion elegante intencional (patron del ecosistema G360)
+# DTZ005: timestamps locales para display de la UI (sin tz)
+ignore = ["BLE001", "S110", "DTZ005"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

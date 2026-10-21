@@ -1,0 +1,25 @@
+{
+  "skill": "cipsa",
+  "device": "pc",
+  "version": "1.0.0",
+  "updatedAt": "2026-09-19T01:08:53.975Z",
+  "colors": {
+    "bg": "#0d1117",
+    "surface": "#161b22",
+    "accent": "#008F5D",
+    "text": "#f0f6fc",
+    "muted": "#8b949e",
+    "success": "#008F5D",
+    "warning": "#B45309",
+    "error": "#DC2626",
+    "accentStrong": "#0B6B47",
+    "accentBright": "#34d399",
+    "accentSoft": "rgba(0, 143, 93, 0.14)",
+    "onAccent": "#ffffff",
+    "info": "#0369A1"
+  },
+  "signature": {
+    "mode": "powered",
+    "text": "powered by G360"
+  }
+}

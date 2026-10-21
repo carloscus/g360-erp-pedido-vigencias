@@ -1,0 +1,22 @@
+# Entornos virtuales
+venv/
+.venv/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Configuracion local (nunca subir)
+.env
+
+# Builds
+dist/
+build/
+
+# Logs y cache de la aplicacion
+run_log.txt
+.cache/
+
+# Preferencias de usuario G360
+.g360/

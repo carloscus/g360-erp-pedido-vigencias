@@ -1,0 +1,53 @@
+"""Configuracion y tema de la aplicacion g360-erp-pedido-vigencias."""
+
+from .settings import (
+    ALERTA_QC_THRESHOLD,
+    ALMACENES_PRIORIDAD,
+    API_TIMEOUT,
+    BASE_DIR,
+    CACHE_TTL,
+    CATALOGO_RUTA,
+    DATA_DIR,
+    LOG_PATH,
+    PRIMARY_CATEGORIES,
+    S1_API_KEY,
+    S1_API_URL,
+    WINDOW_HEIGHT,
+    WINDOW_MIN_HEIGHT,
+    WINDOW_MIN_WIDTH,
+    WINDOW_WIDTH,
+)
+from .theme import (
+    ACCENT,
+    DARK_COLORS,
+    LIGHT_COLORS,
+    get_colors,
+    load_theme_preference,
+    rgba,
+    save_theme_preference,
+)
+
+__all__ = [
+    "ACCENT",
+    "ALERTA_QC_THRESHOLD",
+    "ALMACENES_PRIORIDAD",
+    "API_TIMEOUT",
+    "BASE_DIR",
+    "CACHE_TTL",
+    "CATALOGO_RUTA",
+    "DARK_COLORS",
+    "DATA_DIR",
+    "LIGHT_COLORS",
+    "LOG_PATH",
+    "PRIMARY_CATEGORIES",
+    "S1_API_KEY",
+    "S1_API_URL",
+    "WINDOW_HEIGHT",
+    "WINDOW_MIN_HEIGHT",
+    "WINDOW_MIN_WIDTH",
+    "WINDOW_WIDTH",
+    "get_colors",
+    "load_theme_preference",
+    "rgba",
+    "save_theme_preference",
+]
