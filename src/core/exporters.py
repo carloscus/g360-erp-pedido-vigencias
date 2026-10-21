@@ -1128,6 +1128,12 @@ def export_reporte_acciones(
     _write_despacho_hoy(wb, fam, despacho_hoy, resumen, umbral)
     _write_traslado(wb, pendiente)
     _write_cobranza(wb, an, umbral_planilla)
+    # EXCEPCIONES: revision manual + fuera de allowlist + colados.
+    # Los "colados" son SKUs que aparecen en el embudo aceptado Y en el
+    # rechazado: si el filtro de allowlist no es consistente, hay que
+    # verlo explicito (no se pierde en silencio).
+    _colados = _skus_colados(df, allowlist_rechazados)
+    _write_excepciones(wb, df, allowlist_rechazados, _colados)
     _write_saneamiento(wb, pendiente, df, allowlist_rechazados)
     _write_ya_entregado(wb, df, fam)
     # DETALLE_PEDIDO: destino del hipervinculo (fila por SKU con su sustituto).
@@ -1151,6 +1157,7 @@ def export_reporte_acciones(
         "DETALLE": "808080",
         "YA_ENTREGADO": "808080",
         "SANEAMIENTO": "FFC000",
+        "EXCEPCIONES": "FF0000",
     }
     for ws in wb.worksheets:
         if ws.title in _BLOQUE_A:
@@ -1206,22 +1213,28 @@ def _leeme_rows(fam: str, umbral: float) -> list[tuple[str, str]]:
         ),
         (
             "8. TRASLADO_121",
-            "Solicitud de traslado masivo 121 -> VES. La banda superior es el TOTAL SOLICITUD (unidades y soles); una fila por SKU con a_trasladar (nunca mas del stock 121), valor_traslado, pedidos_cerrar_100 y detalle_fifo (que pedido se lleva que parte, el mas antiguo primero).",
+            "Solicitud de traslado masivo 121 -> VES. La banda superior es el TOTAL SOLICITUD (unidades y soles); una fila por SKU con a_trasladar (nunca mas del stock 121), valor_traslado, pedidos_cerrar_100 y detalle_fifo (que pedido se lleva que parte, el mas antiguo primero). "
+            "Columnas de numeros: saldo_total (lo que se debe), stock_ves (lo que hay en el almacen de venta), stock_121 (lo que hay en QC), cajas_121 (stock_121 / un_bx, el factor de empaque), a_trasladar (lo que se pide mover). "
+            "alerta_121: TRASLADABLE (hasta 1 caja) | TRASLADABLE + OBSERVACION (mas de 1 caja: hay que contar fisico antes de firmar) | OBSERVACION (sobra stock en 121 y no hay faltante). Las filas con OBSERVACION van resaltadas.",
         ),
         (
             "9. COBRANZA",
             "Planillas ANTICIPO no aprobadas con dias (proxy: dias desde PEDIDO_FECHA; el ERP no trae fecha de planilla) y accion escalar/seguimiento.",
         ),
         (
-            "10. SANEAMIENTO",
+            "10. EXCEPCIONES",
+            "Saldos que requieren revision humana (nada se pierde). tipo=REVISION_MANUAL: SKU con saldo pero SIN linea o SIN categoria en el maestro; el saldo se conserva (la deuda es real) y se deriva a negociacion comercial. tipo=FUERA_DE_ALLOWLIST: SKU cuya linea no esta entre las 24 core; se reporta para auditar que ningun producto se este colando en el embudo. tipo=COLADO: SKU presente a la vez en el embudo aceptado y en el rechazado (fallo de integridad del filtro).",
+        ),
+        (
+            "11. SANEAMIENTO",
             "tipo=SIN_COBERTURA: a producir/comprar. tipo=FUERA_DE_FUNNEL: causa (alta en maestro Render / linea sin codigo / codigo fuera de la lista valida). tipo=FUERA_DE_ALLOWLIST: descartado por el filtro estricto de lineas (con unidades y valor).",
         ),
         (
-            "11. YA_ENTREGADO",
+            "12. YA_ENTREGADO",
             "Pedidos cerrados (saldo 0). No hacen ruido en las hojas de accion pero NO se descartan: quedan aqui para consulta (cuanto se entrego, cuando, a quien).",
         ),
         (
-            "12. FOTO_DIA",
+            "13. FOTO_DIA",
             "Foto de HOY contra la foto anterior: pedidos atendidos, con avance, nuevos y retrocesos. El avance se mide solo, sin marcar nada.",
         ),
         (
@@ -1651,6 +1664,180 @@ def _write_drill_vendedor(wb, an, fam: str, umbral: float) -> None:
                     cell.font = _SUBTOTAL_FONT
     ws.freeze_panes = "A4"
     _auto_width(ws)
+    _finish_sheet(ws, ws.max_row, fila_enc=3)
+
+
+def _skus_colados(df: pd.DataFrame, rechazados=None) -> list[str]:
+    """SKUs presentes TANTO en el embudo aceptado como en el rechazado.
+
+    El filtro de allowlist debe ser una particion: un SKU no puede estar
+    en los dos lados. Si aparece en ambos, el filtro no es consistente y
+    hay que reportarlo (tipo=COLADO) en vez de dejarlo pasar en silencio.
+    """
+    if df is None or not len(df) or rechazados is None or not len(rechazados):
+        return []
+    sku_col = "SKU" if "SKU" in df.columns else "ID_ARTICULO"
+    r_col = "SKU" if "SKU" in rechazados.columns else "ID_ARTICULO"
+    if sku_col not in df.columns or r_col not in rechazados.columns:
+        return []
+    aceptados = set(df[sku_col].astype(str).str.strip())
+    rechazados_set = set(rechazados[r_col].astype(str).str.strip())
+    return sorted(aceptados & rechazados_set)
+
+
+def _write_excepciones(wb, df: pd.DataFrame, rechazados=None, colados=None) -> None:
+    """EXCEPCIONES: saldos que requieren revision humana (nada se pierde).
+
+    Concentra en UNA hoja las tres excepciones que antes se dispersaban o
+    no existian:
+
+      REVISION_MANUAL    SKU con saldo pero SIN linea o SIN categoria: el
+                         catalogo no lo reconoce. Se conserva el saldo
+                         (la deuda es real) y se deriva a negociacion.
+      FUERA_DE_ALLOWLIST SKU cuya linea no esta en la allowlist (24 lineas
+                         core). Se reportan para auditar que ningun
+                         producto se este colando en el embudo.
+      COLADO             SKU que aparece TANTO en el embudo aceptado como
+                         en el rechazado: el filtro no es consistente.
+                         Es un fallo de integridad y se marca aparte.
+    """
+    headers = [
+        "tipo",
+        "motivo",
+        "ID_VENDEDOR",
+        "NOM_VENDEDOR",
+        "COD_CLIENTE",
+        "NOM_CLIENTE",
+        "ID_PEDIDO",
+        "SKU",
+        "NOM_ARTICULO",
+        "linea",
+        "origen_linea",
+        "categoria",
+        "saldo",
+        "valor",
+        "pedidos",
+    ]
+    ws = _abrir_hoja(
+        wb,
+        "EXCEPCIONES",
+        "EXCEPCIONES  ·  saldos que requieren revision humana",
+        "tipo=REVISION_MANUAL: SKU con saldo pero sin linea o sin categoria (se "
+        "conserva el saldo, no se descarta). tipo=FUERA_DE_ALLOWLIST: linea fuera "
+        "de las 24 core (auditoria: ningun producto debe colarse). tipo=COLADO: "
+        "SKU aceptado y rechazado a la vez (fallo de integridad del filtro).",
+        headers,
+    )
+    if colados is not None and len(colados):
+        for sku in sorted(set(colados)):
+            ws.append(
+                [
+                    "COLADO",
+                    "SKU presente en el embudo aceptado y en el rechazado: "
+                    "el filtro de allowlist no es consistente",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    str(sku),
+                    "",
+                    "",
+                    "",
+                    "",
+                    0.0,
+                    0.0,
+                    0,
+                ]
+            )
+    if df is not None and len(df) and "saldo" in df.columns:
+        off = df[pd.to_numeric(df["saldo"], errors="coerce").fillna(0) > 0].copy()
+        # REVISION_MANUAL: saldo real pero sin linea o sin categoria.
+        # NO se filtra por `es_linea_valida`: un SKU sin linea tiene
+        # es_linea_valida=False y se perderia de la revision manual.
+        if not off.empty:
+            _lin = off["linea"].astype(str).str.strip().str.upper()
+            _cat = off["categoria"].astype(str).str.strip().str.upper()
+            manual = off[
+                _lin.isin(["", "NAN", "NONE"]) | _cat.isin(["", "NAN", "NONE"])
+            ]
+            if not manual.empty:
+                sku_col = "SKU" if "SKU" in manual.columns else "ID_ARTICULO"
+                for sku, grp in manual.groupby(sku_col, dropna=False):
+                    first = grp.iloc[0]
+                    _l = str(first.get("linea", "") or "").strip()
+                    _c = str(first.get("categoria", "") or "").strip()
+                    if _l.upper() in ("", "NAN", "NONE") and _c.upper() in ("", "NAN", "NONE"):
+                        motivo = "Sin linea y sin categoria: completar maestro"
+                    elif _l.upper() in ("", "NAN", "NONE"):
+                        motivo = "Sin linea en el catalogo: completar maestro"
+                    else:
+                        motivo = f"Sin categoria (linea {_l}): completar maestro"
+                    ws.append(
+                        [
+                            "REVISION_MANUAL",
+                            motivo,
+                            str(first.get("ID_VENDEDOR", "")),
+                            str(first.get("NOM_VENDEDOR", "")),
+                            str(first.get("COD_CLIENTE", "")),
+                            str(first.get("NOM_CLIENTE", "")),
+                            str(first.get("ID_PEDIDO", "")),
+                            str(sku),
+                            str(first.get("NOM_ARTICULO", first.get("nombre_catalogo", ""))),
+                            _l if _l else "(SIN LINEA)",
+                            str(first.get("origen_linea", "")),
+                            _c if _c else "(SIN CATEGORIA)",
+                            float(grp["saldo"].sum()),
+                            float(
+                                pd.to_numeric(
+                                    grp.get("valor_saldo", 0), errors="coerce"
+                                ).fillna(0).sum()
+                            ),
+                            int(grp["ID_PEDIDO"].nunique())
+                            if "ID_PEDIDO" in grp.columns
+                            else len(grp),
+                        ]
+                    )
+    if rechazados is not None and len(rechazados):
+        sku_col = "SKU" if "SKU" in rechazados.columns else "ID_ARTICULO"
+        for sku, grp in rechazados.groupby(sku_col, dropna=False):
+            first = grp.iloc[0]
+            motivo = str(first.get("motivo_rechazo", "") or "FUERA_DE_ALLOWLIST")
+            _lin = str(first.get("linea", "") or "")
+            _sin_linea = _lin.strip().upper() in ("", "NAN", "NONE")
+            if _sin_linea:
+                _lin = "(SIN LINEA)"
+            # Motivo LINEA_VACIA = el SKU no tiene linea: no es "fuera de la
+            # allowlist" sino "sin clasificar" -> va a REVISION_MANUAL.
+            _tipo = "REVISION_MANUAL" if _sin_linea else "FUERA_DE_ALLOWLIST"
+            _motivo = (
+                "SKU sin linea en el maestro: completar catalogo (deuda conservada)"
+                if _sin_linea
+                else motivo
+            )
+            ws.append(
+                [
+                    _tipo,
+                    _motivo,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    str(sku),
+                    str(first.get("NOM_ARTICULO", first.get("nombre_catalogo", ""))),
+                    _lin,
+                    str(first.get("origen_linea", "")),
+                    str(first.get("categoria", "")),
+                    float(pd.to_numeric(grp.get("saldo", 0), errors="coerce").fillna(0).sum()),
+                    float(
+                        pd.to_numeric(grp.get("valor_saldo", 0), errors="coerce").fillna(0).sum()
+                    ),
+                    int(grp["ID_PEDIDO"].nunique())
+                    if "ID_PEDIDO" in grp.columns
+                    else len(grp),
+                ]
+            )
     _finish_sheet(ws, ws.max_row, fila_enc=3)
 
 
@@ -2682,6 +2869,7 @@ def _write_traslado(wb, pendiente) -> None:
     cuantos cierran completos y que hacer si el stock 121 no alcanza.
     Ordenado por impacto (prioridad comercial + antiguedad + monto).
     """
+    from src.config.settings import UMBRAL_CAJAS_121_OBSERVACION
     from src.core.prioridad import prioridad_comercial
 
     headers = [
@@ -2692,7 +2880,10 @@ def _write_traslado(wb, pendiente) -> None:
         "estado_linea",
         "saldo_total",
         "faltante_total",
+        "stock_ves",
         "stock_121",
+        "cajas_121",
+        "alerta_121",
         "a_trasladar",
         "valor_traslado",
         "fuera_de_alcance_121",
@@ -2792,6 +2983,30 @@ def _write_traslado(wb, pendiente) -> None:
             dias_max = int((pd.Timestamp.now().normalize() - _f.normalize()).days)
         pu_pond = float((grp["__pu"] * grp["__falt"]).sum() / falt_total if falt_total > 0 else 0)
         prioridad = int(grp["__prio_com"].min()) if "__prio_com" in grp else 5
+        # --- Reglas de observacion del almacen 121 ---
+        # 121 (QC / produccion terminada) solo tiene `disponible`: NO hay
+        # predespacho que descontar. El factor de empaque (un_bx) define
+        # cuantas cajas hay:
+        #   <= 1 caja                 -> TRASLADABLE
+        #   >  1 caja                 -> TRASLADABLE + OBSERVACION (revisar)
+        #   121 con stock sin faltante -> OBSERVACION (sobra stock en QC)
+        s_ves_sku = float(
+            pd.to_numeric(
+                grp.get("stock_real", grp.get("stock_api_ves", 0)), errors="coerce"
+            ).fillna(0).max()
+        )
+        _un_bx = 1.0
+        if "un_bx" in grp.columns:
+            _un_bx = float(
+                pd.to_numeric(grp["un_bx"], errors="coerce").fillna(1).replace(0, 1).max()
+            )
+        cajas_121 = s121 / _un_bx if _un_bx else 0.0
+        if falt_total <= 0:
+            alerta_121 = "OBSERVACION"
+        elif cajas_121 > UMBRAL_CAJAS_121_OBSERVACION:
+            alerta_121 = "TRASLADABLE + OBSERVACION"
+        else:
+            alerta_121 = "TRASLADABLE"
         rows.append(
             {
                 "sku": str(sku),
@@ -2804,7 +3019,10 @@ def _write_traslado(wb, pendiente) -> None:
                     pd.to_numeric(grp.get("saldo", 0), errors="coerce").fillna(0).sum()
                 ),
                 "faltante_total": falt_total,
+                "stock_ves": s_ves_sku,
                 "stock_121": s121,
+                "cajas_121": round(cajas_121, 2),
+                "alerta_121": alerta_121,
                 "a_trasladar": a_tras,
                 "valor_traslado": a_tras * pu_pond,
                 "fuera": max(falt_total - a_tras, 0.0),
@@ -2847,7 +3065,10 @@ def _write_traslado(wb, pendiente) -> None:
                 r["estado_linea"],
                 round(r["saldo_total"], 2),
                 round(r["faltante_total"], 2),
+                round(r["stock_ves"], 2),
                 round(r["stock_121"], 2),
+                round(r["cajas_121"], 2),
+                r["alerta_121"],
                 round(r["a_trasladar"], 2),
                 round(r["valor_traslado"], 2),
                 round(r["fuera"], 2),
@@ -2860,6 +3081,21 @@ def _write_traslado(wb, pendiente) -> None:
             ]
         )
     ws.freeze_panes = "A5"
+    # Resaltado: las filas que necesitan conteo fisico en 121 (OBSERVACION)
+    # se pintan para que el pedido de traslado no se firme a ciegas.
+    _col_alerta = headers.index("alerta_121") + 1
+    _letra_alerta = get_column_letter(_col_alerta)
+    _fila_ini = 5
+    if ws.max_row >= _fila_ini:
+        ws.conditional_formatting.add(
+            f"{_letra_alerta}{_fila_ini}:{_letra_alerta}{ws.max_row}",
+            FormulaRule(
+                formula=[f'ISNUMBER(SEARCH("OBSERVACION",{_letra_alerta}{_fila_ini}))'],
+                fill=PatternFill(
+                    start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
+                ),
+            ),
+        )
     _auto_width(ws)
     _finish_sheet(ws, ws.max_row, fila_enc=3)
 
