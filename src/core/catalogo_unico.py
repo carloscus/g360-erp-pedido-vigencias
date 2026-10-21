@@ -168,14 +168,22 @@ class CatalogoUnico:
         alias = self.alias_linea
         if txt in alias and txt not in _AMBIGUOS:
             return alias[txt]
-        # 2.5. prefijo de 2 chars: SKUs tipo "CA001" -> "CA", "CB007" -> "CB".
-        #     Solo aplica cuando el valor empieza con 'C' (sub-marcas Crayola)
-        #     para evitar que el prefijo de otras lineas (p.ej. "99"=VARIOS)
-        #     capture valores como "99ZZ" que deberian resolver por sufijo "ZZ".
-        if len(txt) >= 2 and txt.startswith("C"):
+        # 2.5. prefijo de 2 chars:
+        #     - SKUs Crayola "CA001" -> "CA" (empieza con C, linea propia)
+        #     - Codigos numericos "011019" -> "01" (el resolver devuelve "1019"
+        #       que no esta en lineas; el prefijo "01" SI lo esta)
+        #     - NO aplica para "99ZZ" -> deberia usar sufijo "ZZ" (invalido)
+        if len(txt) >= 3:
             pref = txt[:2].upper()
             if pref in lineas:
-                return pref
+                # Solo usar prefijo si el valor empieza con 'C' (Crayola) o
+                # si el resolver no encontro nada util (como "011019"->"1019").
+                # Evita que "99ZZ" se resuelva como "99" (VARIOS) en vez de "".
+                if txt.startswith("C"):
+                    return pref
+                cod_resuelto = resolver_codigo_linea(txt)
+                if not cod_resuelto or cod_resuelto not in lineas:
+                    return pref
         # 3. sufijo de 2 chars
         suf = linea_sufijo(txt)
         if suf and suf in lineas:
