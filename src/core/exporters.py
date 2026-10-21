@@ -1185,7 +1185,11 @@ def _leeme_rows(fam: str, umbral: float) -> list[tuple[str, str]]:
         ("COMO SE LEE (5 minutos)", ""),
         (
             "1. PANEL",
-            "El cierre del dia: cuanto se entrega libre hoy, cuanto esta condicionado a planilla, cuantas guias 121 y cuanto dinero en cobranza. Mas top 3 vendedores y quick wins.",
+            "El cierre del dia. LAS TRES MEDIDAS DE LA DEUDA (no se confunden): "
+            "1) Saldo pendiente: lo que se debe segun la fuente de vigencias. "
+            "2) Saldo fisicamente cubrible: lo que podria cubrirse con stock utilizable (VES + 121), antes de mirar autorizaciones. "
+            "3) Saldo liberado: lo que ademas cumple cobertura VES y autorizacion (planilla + pedido aprobados). "
+            "Ademas: desglose por estado de linea (Nuevo/Tradicional/Importado/Nacional), saldo sin estado (SKUs descontinuados o nuevos, ver EXCEPCIONES), cuanto se entrega hoy, cuanto esta condicionado a planilla, guias 121 y cobranza. Mas top 3 vendedores y quick wins.",
         ),
         (
             "2. POR_VENDEDOR",
@@ -1193,7 +1197,8 @@ def _leeme_rows(fam: str, umbral: float) -> list[tuple[str, str]]:
         ),
         (
             "3. PEDIDOS",
-            "Tabla unica de pedidos (accionables + bloqueados), ordenada por vendedor. Filtrar por estado_accion: ENTREGA_TOTAL / PARCIAL / TRASLADO / OBSERVACION / SIN_COBERTURA / BLOQUEADO_ESTADO. Llave: ID_PEDIDO (la OC viene vacia 63% de veces). Columnas de segmento: lineas / categorias / estados_linea (para filtrar sin partir el libro).",
+            "Tabla unica de pedidos (accionables + bloqueados), ordenada por vendedor. Filtrar por estado_accion: ENTREGA_TOTAL / PARCIAL / TRASLADO / OBSERVACION / SIN_COBERTURA / BLOQUEADO_ESTADO. Llave: ID_PEDIDO (la OC viene vacia 63% de veces). Columnas de segmento: lineas / categorias / estados_linea (para filtrar sin partir el libro). "
+            "PROXIMO AL CIERRE con numeros: skus_faltantes (cuantos SKU sin cubrir), unidades_faltantes (cuantas unidades) y detalle_faltantes (que SKU y cuantas unidades: '011262:60; 011861:11; ...'). Con un porcentaje solo no se puede actuar: hay que saber QUE falta.",
         ),
         (
             "4. AVANCE_PEDIDO",
@@ -1416,6 +1421,9 @@ def _pedidos_unificados(an, fam: str, umbral: float) -> pd.DataFrame:
         "val_atencion",
         "val_pendiente",
         "trasladable",
+        "skus_faltantes",
+        "unidades_faltantes",
+        "detalle_faltantes",
         "kg_hoy",
         "kg_saldo",
         "kg_cobertura",
@@ -1520,6 +1528,9 @@ def _write_pedidos(wb, pedidos: pd.DataFrame) -> None:
         "filas",
         "pct_cubierto",
         "casi_cierra",
+        "skus_faltantes",
+        "unidades_faltantes",
+        "detalle_faltantes",
         "despachable_hoy",
         "si_se_aprueba",
         "kg_hoy",
@@ -1572,6 +1583,9 @@ def _write_pedidos(wb, pedidos: pd.DataFrame) -> None:
                     int(_num(r.get("filas", 0))),
                     _num(r.get("pct_cubierto", 0)),
                     "SI" if bool(r.get("casi_cierra", False)) else "NO",
+                    int(_num(r.get("skus_faltantes", 0))),
+                    _num(r.get("unidades_faltantes", 0)),
+                    str(r.get("detalle_faltantes", "")),
                     _num(r.get("despachable_hoy", 0)),
                     _num(r.get("si_se_aprueba", 0)),
                     _num(r.get("kg_hoy", 0)),
@@ -2192,7 +2206,45 @@ def _write_panel(
     ws["A2"] = "CIERRE OPERATIVO HOY"
     ws["B2"] = "Detalle"
     _style_header(ws, 2)
+    # --- LAS TRES MEDIDAS DE LA DEUDA (no se confunden) ---
+    # 1. Saldo PENDIENTE: lo que se debe segun la fuente de vigencias.
+    # 2. Saldo FISICAMENTE CUBRIBLE: lo que podria cubrirse con stock
+    #    utilizable (VES + 121), antes de mirar autorizaciones.
+    # 3. Saldo LIBERADO: lo que además cumple condiciones administrativas.
+    try:
+        _pf = pendiente if pendiente is not None else df
+        _und = _pf["saldo"].sum() if "saldo" in _pf.columns else 0.0
+        _val = (
+            _pf["valor_saldo"].sum() if "valor_saldo" in _pf.columns else 0.0
+        )
+        _ves_s = pd.to_numeric(
+            _pf.get("stock_real", _pf.get("stock_api_ves", 0)), errors="coerce"
+        ).fillna(0)
+        _s121_s = pd.to_numeric(_pf.get("stock_api_121", 0), errors="coerce").fillna(0)
+        _sal_s = pd.to_numeric(_pf.get("saldo", 0), errors="coerce").fillna(0)
+        _cub_ves = _sal_s.clip(upper=_ves_s)
+        _cub_121 = (_sal_s - _cub_ves).clip(lower=0).clip(upper=_s121_s)
+        _und_cubrible = float(_cub_ves.sum() + _cub_121.sum())
+        # Saldo LIBERADO: `val_atencion` ya exige cobertura en VES y planilla
+        # aprobada (ver _recompute_relevance), asi que es el saldo despacho.
+        _und_liberado = float(
+            entrega["saldo"].sum() if "saldo" in entrega.columns else 0.0
+        )
+    except Exception:
+        _und = _val = _und_cubrible = _und_liberado = 0.0
     cierre = [
+        (
+            f"Saldo pendiente: {_und:,.0f} und / S/ {_val:,.2f}",
+            "total segun la fuente de vigencias (base conciliada)",
+        ),
+        (
+            f"Saldo fisicamente cubrible: {_und_cubrible:,.0f} und",
+            "VES + 121 con stock disponible (aun sin autorizacion)",
+        ),
+        (
+            f"Saldo liberado para despacho: {_und_liberado:,.0f} und / S/ {val_e:,.2f}",
+            "cumple cobertura VES y autorizacion (planilla+pedido aprobados)",
+        ),
         (
             f"Despacho inmediato: S/ {val_e:,.2f} en {n_e} filas (ver DESPACHO_HOY)",
             f"{n_e} lineas libres con stock VES confirmado",
@@ -2210,6 +2262,46 @@ def _write_panel(
             f"aprobar/escalar >{umbral_planilla}d para liberar almacen",
         ),
     ]
+    # Desglose del saldo pendiente por estado de linea (guia ERP):
+    # Nuevo / Tradicional / Importado / Nacional + lo que no tiene estado
+    # (SKU descontinuados o nuevos, que se reportan en EXCEPCIONES).
+    try:
+        _pf2 = pendiente if pendiente is not None else df
+        if _pf2 is not None and len(_pf2) and "saldo" in _pf2.columns:
+            _sal2 = pd.to_numeric(_pf2["saldo"], errors="coerce").fillna(0)
+            _est2 = (
+                _pf2["estado_linea"].astype(str).str.strip().str.upper()
+                if "estado_linea" in _pf2.columns
+                else pd.Series("", index=_pf2.index)
+            )
+            _pos2 = _sal2.clip(lower=0)
+            for _e2 in ("NUEVO", "TRADICIONAL", "IMPORTADO", "NACIONAL"):
+                _m2 = _est2.eq(_e2)
+                _u2 = float(_pos2[_m2].sum())
+                if _u2 <= 0:
+                    continue
+                _v2 = 0.0
+                if "valor_saldo" in _pf2.columns:
+                    _v2 = float(
+                        pd.to_numeric(_pf2["valor_saldo"], errors="coerce")
+                        .fillna(0)[_m2].sum()
+                    )
+                cierre.append(
+                    (
+                        f"Saldo {_e2.title()}: {_u2:,.0f} und / S/ {_v2:,.2f}",
+                        "desglose por estado de linea (guia ERP SKU_BX)",
+                    )
+                )
+            _sin2 = float(_pos2[_est2.isin(["", "NAN", "NONE"])].sum())
+            if _sin2 > 0:
+                cierre.append(
+                    (
+                        f"Saldo sin estado de linea: {_sin2:,.0f} und",
+                        "SKUs descontinuados o nuevos: revisar en EXCEPCIONES",
+                    )
+                )
+    except Exception:
+        pass
     # Estados de linea fuera de la guia ERP: el API los rellena con el grupo
     # del producto ("TAJADORES", "RESALTADORES"...) y no son estados.
     try:
