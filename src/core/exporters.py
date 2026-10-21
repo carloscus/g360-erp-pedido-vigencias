@@ -1120,6 +1120,7 @@ def export_reporte_acciones(
         stock_age_hours,
         entrega,
         allowlist_resumen=_al_resumen or None,
+        allowlist_rechazados=allowlist_rechazados,
     )
     _write_drill_vendedor(wb, an, fam, umbral)
     _write_pedidos(wb, pedidos)
@@ -2162,6 +2163,7 @@ def _write_panel(
     stock_age_hours: float | None = None,
     entrega_total=None,
     allowlist_resumen: dict | None = None,
+    allowlist_rechazados=None,
 ) -> None:
     """PANEL: el cierre de hoy (KPIs + bullets + top 3) en una sola vista.
 
@@ -2300,6 +2302,75 @@ def _write_panel(
                         "SKUs descontinuados o nuevos: revisar en EXCEPCIONES",
                     )
                 )
+    except Exception:
+        pass
+    # --- CONCILIACION: ninguna cifra se pierde en silencio ---
+    # Se compara el MISMO embudo en dos cortes:
+    #   - el que ve el usuario (familia + linea valida + APROBADO)
+    #   - la fuente completa (todo lo que trae el reporte de vigencias)
+    # La diferencia es el saldo que queda FUERA del embudo: no es una
+    # perdida silenciosa, es lo que se reporta en EXCEPCIONES.
+    try:
+        if df is not None and len(df) and "saldo" in df.columns:
+            _sal_fuente = float(
+                pd.to_numeric(df["saldo"], errors="coerce").fillna(0).clip(lower=0).sum()
+            )
+            _sal_embudo = 0.0
+            if an is not None:
+                try:
+                    _emb = an.filtrar_familia(fam)
+                    if "saldo" in _emb.columns:
+                        _sal_embudo = float(
+                            pd.to_numeric(_emb["saldo"], errors="coerce")
+                            .fillna(0)
+                            .clip(lower=0)
+                            .sum()
+                        )
+                except Exception:
+                    _sal_embudo = 0.0
+            _fuera = max(_sal_fuente - _sal_embudo, 0.0)
+            _n_fuera = 0
+            if an is not None:
+                try:
+                    _emb2 = an.filtrar_familia(fam)
+                    if "saldo" in _emb2.columns:
+                        _n_fuera = int(
+                            (
+                                pd.to_numeric(_emb2["saldo"], errors="coerce")
+                                .fillna(0)
+                                .clip(lower=0)
+                                .gt(0)
+                            ).sum()
+                        )
+                except Exception:
+                    _n_fuera = 0
+            cierre.append(
+                (
+                    f"Conciliacion: S/ {_sal_fuente:,.2f} en la fuente / "
+                    f"S/ {_sal_embudo:,.2f} en el embudo",
+                    f"fuera del embudo: S/ {_fuera:,.2f} ({_n_fuera} lineas, ver EXCEPCIONES)",
+                )
+            )
+    except Exception:
+        pass
+    # --- CONTROL ANTI-COLADO: el filtro de allowlist debe ser una particion ---
+    # Un SKU no puede estar a la vez en el embudo aceptado y en el rechazado.
+    try:
+        _col = _skus_colados(df, allowlist_rechazados)
+        if _col:
+            cierre.append(
+                (
+                    f"ALERTA: {len(_col)} SKUs colados en el filtro de allowlist",
+                    f"aceptados y rechazados a la vez: {', '.join(_col[:4])} (ver EXCEPCIONES)",
+                )
+            )
+        else:
+            cierre.append(
+                (
+                    "Control de allowlist OK: ningun SKU colado",
+                    "aceptados y rechazados son conjuntos disjuntos",
+                )
+            )
     except Exception:
         pass
     # Estados de linea fuera de la guia ERP: el API los rellena con el grupo
