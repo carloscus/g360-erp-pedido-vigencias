@@ -101,6 +101,19 @@ catalogo local > ERP. El peso final es la union de Render y el maestro ERP.
 ### Filtro estricto de lineas (allowlist)
 
 Solo pasa al embudo lo que pertenece a una linea autorizada (24 lineas core).
+
+> **SKUs Crayola (prefijo C):** el catalogo unico (cartucho) tiene lineas
+> propias para cada sub-marca Crayola: CA (PINTURA), CB (ESCRITURA),
+> CC (PEGAMENTOS), CD (ACCESORIOS), CE (MANUALIDADES), CF (SET).
+> Un SKU como `CA087` resuelve a linea **CA**, no a 77 (PINTURA).
+> La resolucion usa el **prefijo** de 2 chars (primeros caracteres) cuando
+> el valor tiene 3+ chars y el resolver por codigo no da un resultado
+> valido en el maestro. Esto evita que `CA087` caiga en 01 (PELOTAS)
+> por el sufijo "87".
+>
+> **SKUs numericos:** `78698` -> linea **78** (ARCHIVO), `011019` -> linea
+> **01** (PELOTAS). El prefijo se prioriza sobre el sufijo cuando ambos
+> existen en el maestro.
 La linea manda: si resuelve a un codigo no autorizado se descarta, y una linea
 vacia tambien (el grupo no rescata). Lo descartado queda en `SANEAMIENTO`
 (`tipo=FUERA_DE_ALLOWLIST`) con unidades y valor: nada se pierde en silencio.
