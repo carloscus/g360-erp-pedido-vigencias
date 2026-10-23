@@ -35,9 +35,7 @@ ALMACENES_PRIORIDAD = ["VES", "121", "40", "129"]
 # en 121 supera este numero de CAJAS (no unidades), el traslado se marca
 # para REVISION (conteo fisico) ademas de trasladable.
 # Cajas = stock_121 / un_bx (el factor de empaque varia por SKU).
-UMBRAL_CAJAS_121_OBSERVACION = float(
-    os.environ.get("G360_UMBRAL_CAJAS_121_OBSERVACION", "1")
-)
+UMBRAL_CAJAS_121_OBSERVACION = float(os.environ.get("G360_UMBRAL_CAJAS_121_OBSERVACION", "1"))
 
 # Umbral de alerta QC: SKUs con saldo > este valor (units) en VES generan alerta
 ALERTA_QC_THRESHOLD = int(os.environ.get("G360_ALERTA_QC_THRESHOLD", "5000"))
@@ -99,7 +97,7 @@ LINEA_NOMBRE_A_CODIGO: dict[str, str] = {
     "ACCESORIOS DEPORTIVOS": "AD",
     "PRODUCTOS INDUSTRIALES": "20",
     "REPRESENTACIONES INDUSTRIALES": "21",
-    "SEGURIDAD Y SEÑALIZACION VIAL": "23",
+    "SEGURIDAD Y SENALIZACION VIAL": "23",
     "CIPTECH ETIQUETAS": "30",
     "CIPTECH CINTAS": "31",
     "CIPTECH CPEI": "32",
