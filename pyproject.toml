@@ -2,7 +2,7 @@
 name = "g360-erp-pedido-vigencias"
 version = "0.1.0"
 description = "Dashboard Flet desktop para analisis de vigencias de pedidos CIPSA"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "flet[desktop]",
     "pandas",
