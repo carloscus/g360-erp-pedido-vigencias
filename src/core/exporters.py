@@ -168,16 +168,20 @@ def _abrir_hoja(wb, nombre: str, titulo: str, subtitulo: str, headers: list[str]
 
 
 def _auto_width(ws) -> None:
-    """Ajusta el ancho de columnas segun el contenido (max 40)."""
+    """Ajusta el ancho de columnas segun el contenido (max 40).
+
+    Solo se muestrean las primeras filas para no bloquear en hojas grandes.
+    """
+    SAMPLE = 200
     for col_cells in ws.columns:
         letter = get_column_letter(col_cells[0].column)
         max_len = 0
-        for cell in col_cells:
+        for cell in list(col_cells)[:SAMPLE]:
             val = cell.value
             if val is not None:
                 length = len(str(val))
                 max_len = max(max_len, length)
-        ws.column_dimensions[letter].width = min(max_len + 3, 40)
+        ws.column_dimensions[letter].width = min(max_len + 3, 40) if max_len else 12
 
 
 def export_to_xlsx(df: pd.DataFrame, output_path: str | Path | None = None) -> Path:
@@ -694,54 +698,40 @@ def _write_detalle(wb: Workbook, df: pd.DataFrame) -> None:
     h = n_raw + 5  # cajas
     i = n_raw + 6  # valor_saldo
 
-    # Indice de un_bx y PRE_ARTICULO dentro de raw_cols
-    ubx_col = raw_cols.index("un_bx") + 1 if "un_bx" in raw_cols else None
-    precio_col = raw_cols.index("PRE_ARTICULO") + 1 if "PRE_ARTICULO" in raw_cols else None
+    # Letras de columnas (calculadas una sola vez, no por fila)
+    col_pedido = get_column_letter(d)
+    col_despacho = get_column_letter(e)
+    col_saldo = get_column_letter(f)
+    ubx_letter = get_column_letter(raw_cols.index("un_bx") + 1) if "un_bx" in raw_cols else None
+    precio_letter = (
+        get_column_letter(raw_cols.index("PRE_ARTICULO") + 1)
+        if "PRE_ARTICULO" in raw_cols
+        else None
+    )
 
+    # Pre-calcular formulas por fila usando append unico (mas rapido que ws.cell por celda).
+    # Contador manual de fila para evitar ws.max_row (O(n) por llamada -> O(n^2)).
+    r = 2
     for _, row in df.iterrows():
-        values = [str(row.get(c, "") if row.get(c) is not None else "") for c in raw_cols]
         pedido = float(row.get("CAN_PEDIDO", 0) or 0)
         despacho = float(row.get("CAN_DESPACHO", 0) or 0)
+        values = [str(row.get(c, "") if row.get(c) is not None else "") for c in raw_cols]
         values += [
             pedido,
             despacho,
-            "",
-            "",
-            "",
-            "",
+            f"={col_pedido}{r}-{col_despacho}{r}",
+            f"=IF({col_pedido}{r}=0,0,{col_despacho}{r}/{col_pedido}{r}*100)",
+            f"=IF({ubx_letter}{r}=0,0,{col_saldo}{r}/{ubx_letter}{r})" if ubx_letter else "",
+            f"=IF({col_pedido}{r}=0,0,{col_saldo}{r}/{col_pedido}{r}*{precio_letter}{r})"
+            if precio_letter
+            else "",
             bool(row.get("es_linea_valida", False)),
             bool(row.get("es_prototipo", False)),
             float(row.get("val_atencion", 0) or 0),
             float(row.get("val_pendiente", 0) or 0),
         ]
         ws.append(values)
-
-        r = ws.max_row
-        # Letras de columnas reales en la hoja
-        col_pedido = get_column_letter(d)  # CAN_PEDIDO
-        col_despacho = get_column_letter(e)  # CAN_DESPACHO
-        col_saldo = get_column_letter(f)  # saldo
-        # Formulas Excel para campos calculados (modificables por el usuario)
-        # saldo = CAN_PEDIDO - CAN_DESPACHO
-        ws.cell(row=r, column=f, value=f"={col_pedido}{r}-{col_despacho}{r}")
-        # por_atendido = CAN_DESPACHO / CAN_PEDIDO * 100
-        ws.cell(
-            row=r, column=g, value=f"=IF({col_pedido}{r}=0,0,{col_despacho}{r}/{col_pedido}{r}*100)"
-        )
-        # cajas = saldo / un_bx
-        if ubx_col:
-            ubx_letter = get_column_letter(ubx_col)
-            ws.cell(
-                row=r, column=h, value=f"=IF({ubx_letter}{r}=0,0,{col_saldo}{r}/{ubx_letter}{r})"
-            )
-        # valor_saldo = (saldo / CAN_PEDIDO) * PRE_ARTICULO
-        if precio_col:
-            precio_letter = get_column_letter(precio_col)
-            ws.cell(
-                row=r,
-                column=i,
-                value=f"=IF({col_pedido}{r}=0,0,{col_saldo}{r}/{col_pedido}{r}*{precio_letter}{r})",
-            )
+        r += 1
 
     ws.freeze_panes = "A2"
     _auto_width(ws)
@@ -1125,9 +1115,10 @@ def export_reporte_acciones(
     _write_drill_vendedor(wb, an, fam, umbral)
     _write_pedidos(wb, pedidos)
     _write_avance_pedido(wb, an, fam)
-    _write_por_cliente(wb, an, fam)
+    _write_por_cliente_detallado(wb, an, fam)
     _write_despacho_hoy(wb, fam, despacho_hoy, resumen, umbral)
     _write_traslado(wb, pendiente)
+    _write_traslado_por_vendedor(wb, pendiente)
     _write_cobranza(wb, an, umbral_planilla)
     # EXCEPCIONES: revision manual + fuera de allowlist + colados.
     # Los "colados" son SKUs que aparecen en el embudo aceptado Y en el
@@ -1773,9 +1764,7 @@ def _write_excepciones(wb, df: pd.DataFrame, rechazados=None, colados=None) -> N
         if not off.empty:
             _lin = off["linea"].astype(str).str.strip().str.upper()
             _cat = off["categoria"].astype(str).str.strip().str.upper()
-            manual = off[
-                _lin.isin(["", "NAN", "NONE"]) | _cat.isin(["", "NAN", "NONE"])
-            ]
+            manual = off[_lin.isin(["", "NAN", "NONE"]) | _cat.isin(["", "NAN", "NONE"])]
             if not manual.empty:
                 sku_col = "SKU" if "SKU" in manual.columns else "ID_ARTICULO"
                 for sku, grp in manual.groupby(sku_col, dropna=False):
@@ -1804,9 +1793,9 @@ def _write_excepciones(wb, df: pd.DataFrame, rechazados=None, colados=None) -> N
                             _c if _c else "(SIN CATEGORIA)",
                             float(grp["saldo"].sum()),
                             float(
-                                pd.to_numeric(
-                                    grp.get("valor_saldo", 0), errors="coerce"
-                                ).fillna(0).sum()
+                                pd.to_numeric(grp.get("valor_saldo", 0), errors="coerce")
+                                .fillna(0)
+                                .sum()
                             ),
                             int(grp["ID_PEDIDO"].nunique())
                             if "ID_PEDIDO" in grp.columns
@@ -1848,9 +1837,7 @@ def _write_excepciones(wb, df: pd.DataFrame, rechazados=None, colados=None) -> N
                     float(
                         pd.to_numeric(grp.get("valor_saldo", 0), errors="coerce").fillna(0).sum()
                     ),
-                    int(grp["ID_PEDIDO"].nunique())
-                    if "ID_PEDIDO" in grp.columns
-                    else len(grp),
+                    int(grp["ID_PEDIDO"].nunique()) if "ID_PEDIDO" in grp.columns else len(grp),
                 ]
             )
     _finish_sheet(ws, ws.max_row, fila_enc=3)
@@ -2216,9 +2203,7 @@ def _write_panel(
     try:
         _pf = pendiente if pendiente is not None else df
         _und = _pf["saldo"].sum() if "saldo" in _pf.columns else 0.0
-        _val = (
-            _pf["valor_saldo"].sum() if "valor_saldo" in _pf.columns else 0.0
-        )
+        _val = _pf["valor_saldo"].sum() if "valor_saldo" in _pf.columns else 0.0
         _ves_s = pd.to_numeric(
             _pf.get("stock_real", _pf.get("stock_api_ves", 0)), errors="coerce"
         ).fillna(0)
@@ -2229,9 +2214,7 @@ def _write_panel(
         _und_cubrible = float(_cub_ves.sum() + _cub_121.sum())
         # Saldo LIBERADO: `val_atencion` ya exige cobertura en VES y planilla
         # aprobada (ver _recompute_relevance), asi que es el saldo despacho.
-        _und_liberado = float(
-            entrega["saldo"].sum() if "saldo" in entrega.columns else 0.0
-        )
+        _und_liberado = float(entrega["saldo"].sum() if "saldo" in entrega.columns else 0.0)
     except Exception:
         _und = _val = _und_cubrible = _und_liberado = 0.0
     cierre = [
@@ -2285,8 +2268,7 @@ def _write_panel(
                 _v2 = 0.0
                 if "valor_saldo" in _pf2.columns:
                     _v2 = float(
-                        pd.to_numeric(_pf2["valor_saldo"], errors="coerce")
-                        .fillna(0)[_m2].sum()
+                        pd.to_numeric(_pf2["valor_saldo"], errors="coerce").fillna(0)[_m2].sum()
                     )
                 cierre.append(
                     (
@@ -2846,7 +2828,7 @@ def _link_pedidos(ws, desde: int, col: int = 1, hoja: str = "DETALLE_PEDIDO") ->
         cel.font = Font(color="0563C1", underline="single")
 
 
-def _write_por_cliente(wb, an, familia: str | None = None) -> None:
+def _write_por_cliente_detallado(wb, an, familia: str | None = None) -> None:
     """POR_CLIENTE: vendedor x cliente con desglose por estado_linea."""
     headers = [
         "ID_VENDEDOR",
@@ -3024,6 +3006,156 @@ def _write_ya_entregado(wb, df, familia: str | None = None) -> None:
     _finish_sheet(ws, ws.max_row, fila_enc=3)
 
 
+def _write_traslado_por_vendedor(wb, pendiente) -> None:
+    """TRASLADO_POR_VENDEDOR: desglose por SKU x vendedor.
+
+    Permite pasar el reporte a cada vendedor con SUS pendientes y
+    cuanta transferencia le corresponde. Una fila por (SKU, vendedor).
+
+    Columnas:
+      SKU, NOM_ARTICULO, linea, estado_linea, ID_VENDEDOR, NOM_VENDEDOR,
+      pendiente_und, cajas_vendedor, a_trasladar_vendedor, pedidos, pedido_top,
+      detalle_fifo, stock_121, alerta_121.
+    """
+    from src.config.settings import UMBRAL_CAJAS_121_OBSERVACION
+
+    headers = [
+        "SKU",
+        "NOM_ARTICULO",
+        "linea",
+        "estado_linea",
+        "ID_VENDEDOR",
+        "NOM_VENDEDOR",
+        "pendiente_und",
+        "cajas_vendedor",
+        "a_trasladar_vendedor",
+        "stock_121",
+        "alerta_121",
+        "pedidos",
+        "pedido_top",
+        "detalle_fifo",
+    ]
+    ws = _abrir_hoja(
+        wb,
+        "TRASLADO_POR_VENDEDOR",
+        "TRASLADO POR VENDEDOR  ·  desglose SKU x vendedor (121 -> VES)",
+        "Una fila por (SKU, vendedor): cuanto debe cada vendedor de cada SKU "
+        "y que parte del traslado 121 le corresponde. Filtrar por ID_VENDEDOR "
+        "(ej. 052, 177, 178) para pasar el reporte a un vendedor especifico.",
+        headers,
+    )
+    if pendiente is None or pendiente.empty:
+        ws.freeze_panes = "A4"
+        _finish_sheet(ws, ws.max_row, fila_enc=3)
+        return
+    sub = pendiente.copy()
+    _s121 = pd.to_numeric(sub.get("stock_api_121", 0), errors="coerce").fillna(0)
+    sub = sub[_s121 > 0].copy()
+    if sub.empty:
+        ws.freeze_panes = "A4"
+        _finish_sheet(ws, ws.max_row, fila_enc=3)
+        return
+    _ves = pd.to_numeric(sub.get("stock_real", sub.get("stock_api_ves", 0)), errors="coerce").fillna(0)
+    _sal = pd.to_numeric(sub.get("saldo", 0), errors="coerce").fillna(0)
+    sub["__falt"] = (_sal - _ves).clip(lower=0)
+    sku_col = "SKU" if "SKU" in sub.columns else "ID_ARTICULO"
+    nom_col = "NOM_ARTICULO" if "NOM_ARTICULO" in sub.columns else "nombre_catalogo"
+    vid_col = "ID_VENDEDOR" if "ID_VENDEDOR" in sub.columns else None
+    nom_vend_col = "NOM_VENDEDOR" if "NOM_VENDEDOR" in sub.columns else None
+    if vid_col is None:
+        ws.freeze_panes = "A4"
+        _finish_sheet(ws, ws.max_row, fila_enc=3)
+        return
+
+    # Por SKU: total de faltante y stock 121, para repartir proporcionalmente.
+    sku_totals: dict[str, dict] = {}
+    for sku, grp in sub.groupby(sku_col, dropna=False):
+        s121 = float(pd.to_numeric(grp["stock_api_121"], errors="coerce").fillna(0).max())
+        falt_total = float(grp["__falt"].sum())
+        a_tras = min(falt_total, s121)
+        sku_totals[str(sku)] = {"s121": s121, "falt_total": falt_total, "a_tras": a_tras}
+
+    rows = []
+    for (sku, vid), grp in sub.groupby([sku_col, vid_col], dropna=False):
+        grp = grp.copy()
+        grp["_f"] = pd.to_datetime(grp.get("PEDIDO_FECHA", ""), dayfirst=True, errors="coerce")
+        grp = grp.sort_values("_f", na_position="last")
+        falt_vend = float(grp["__falt"].sum())
+        if falt_vend <= 0:
+            continue
+        tot = sku_totals[str(sku)]
+        a_tras_vend = (
+            tot["a_tras"] * (falt_vend / tot["falt_total"]) if tot["falt_total"] > 0 else 0.0
+        )
+        _un_bx = 1.0
+        if "un_bx" in grp.columns:
+            _un_bx = float(
+                pd.to_numeric(grp["un_bx"], errors="coerce").fillna(1).replace(0, 1).max()
+            )
+        cajas_vend = a_tras_vend / _un_bx if _un_bx else 0.0
+        if tot["falt_total"] <= 0:
+            alerta = "OBSERVACION"
+        elif (tot["s121"] / _un_bx if _un_bx else 0) > UMBRAL_CAJAS_121_OBSERVACION:
+            alerta = "TRASLADABLE + OBSERVACION"
+        else:
+            alerta = "TRASLADABLE"
+        detalle = []
+        restante = a_tras_vend
+        for _, ln in grp.iterrows():
+            if restante <= 0:
+                break
+            want = float(ln["__falt"] or 0)
+            if want <= 0:
+                continue
+            take = min(want, restante)
+            detalle.append(f"{ln.get('ID_PEDIDO', '')}:{int(take)}")
+            restante -= take
+        rows.append(
+            {
+                "sku": str(sku),
+                "nombre": str(grp[nom_col].iloc[0]) if nom_col in grp.columns else "",
+                "linea": str(grp["linea"].iloc[0]) if "linea" in grp.columns else "",
+                "estado_linea": (
+                    str(grp["estado_linea"].iloc[0]) if "estado_linea" in grp.columns else ""
+                ),
+                "vendedor": str(grp[vid_col].iloc[0]) if vid_col else "",
+                "nom_vendedor": str(grp[nom_vend_col].iloc[0]) if nom_vend_col else "",
+                "pendiente_und": falt_vend,
+                "cajas_vendedor": round(cajas_vend, 2),
+                "a_trasladar_vendedor": round(a_tras_vend, 2),
+                "stock_121": tot["s121"],
+                "alerta_121": alerta,
+                "pedidos": int(grp["ID_PEDIDO"].nunique()) if "ID_PEDIDO" in grp else len(grp),
+                "pedido_top": (grp["ID_PEDIDO"].iloc[0] if len(grp) else ""),
+                "detalle_fifo": "; ".join(detalle),
+            }
+        )
+    out = pd.DataFrame(rows)
+    out = out.sort_values(["vendedor", "a_trasladar_vendedor"], ascending=[True, False])
+    for _, r in out.iterrows():
+        ws.append(
+            [
+                r["sku"],
+                r["nombre"],
+                r["linea"],
+                r["estado_linea"],
+                r["vendedor"],
+                r["nom_vendedor"],
+                round(r["pendiente_und"], 2),
+                r["cajas_vendedor"],
+                r["a_trasladar_vendedor"],
+                round(r["stock_121"], 2),
+                r["alerta_121"],
+                r["pedidos"],
+                r["pedido_top"],
+                r["detalle_fifo"],
+            ]
+        )
+    ws.freeze_panes = "A4"
+    _auto_width(ws)
+    _finish_sheet(ws, ws.max_row, fila_enc=3)
+
+
 def _write_traslado(wb, pendiente) -> None:
     """TRASLADO_121: solicitud contundente de traslado masivo 121 -> VES.
 
@@ -3154,9 +3286,9 @@ def _write_traslado(wb, pendiente) -> None:
         #   >  1 caja                 -> TRASLADABLE + OBSERVACION (revisar)
         #   121 con stock sin faltante -> OBSERVACION (sobra stock en QC)
         s_ves_sku = float(
-            pd.to_numeric(
-                grp.get("stock_real", grp.get("stock_api_ves", 0)), errors="coerce"
-            ).fillna(0).max()
+            pd.to_numeric(grp.get("stock_real", grp.get("stock_api_ves", 0)), errors="coerce")
+            .fillna(0)
+            .max()
         )
         _un_bx = 1.0
         if "un_bx" in grp.columns:
@@ -3254,9 +3386,7 @@ def _write_traslado(wb, pendiente) -> None:
             f"{_letra_alerta}{_fila_ini}:{_letra_alerta}{ws.max_row}",
             FormulaRule(
                 formula=[f'ISNUMBER(SEARCH("OBSERVACION",{_letra_alerta}{_fila_ini}))'],
-                fill=PatternFill(
-                    start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"
-                ),
+                fill=PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"),
             ),
         )
     _auto_width(ws)
