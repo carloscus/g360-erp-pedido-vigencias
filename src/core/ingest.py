@@ -13,6 +13,7 @@ Responsabilidades:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -23,16 +24,15 @@ import pandas as pd
 import requests
 
 from src.config.settings import (
-    API_TIMEOUT,
     CACHE_TTL,
     CATALOGO_RUTA,
     CONDICION_PROTOTIPO,
     DATA_DIR,
-    ESTADOS_LINEA_VALIDOS,
     ESTADO_DESPACHABLE,
-    LINEAS_VALIDAS_DEFAULT,
+    ESTADOS_LINEA_VALIDOS,
     LINEA_NOMBRE_A_CODIGO,
     LINEA_NOMBRES_AMBIGUOS,
+    LINEAS_VALIDAS_DEFAULT,
     S1_API_KEY,
     S1_API_URL,
 )
@@ -50,6 +50,8 @@ _NUMERIC_COLS = [
     "POR_DESPACHO",
     "ORD_DESPACHO",
 ]
+
+_log = logging.getLogger("g360.pedido_vigencias")
 
 
 def linea_sufijo(val) -> str:
@@ -253,7 +255,7 @@ class Ingester:
         cat = get_catalogo()
         try:
             ok = cat.cargar(forzar=forzar)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._db_unavailable = True
             self.db_error_msg = f"Catalogo unico no disponible ({exc})"
             return False
@@ -446,6 +448,11 @@ class Ingester:
         # pelado, sin etiqueta, cuando no hay nombre). Si el texto no trae
         # separador, `linea_code` ya es el codigo y `linea_nombre` queda vacio.
         grupo_code, grupo_nombre = Ingester._split_code_name(item.get("grupo", ""))
+        # El API enriquecido trae grupo_id (codigo) separado del nombre.
+        if not grupo_code:
+            grupo_code = str(item.get("grupo_id", "") or "").strip().upper()
+        if not grupo_nombre:
+            grupo_nombre = str(item.get("grupo", "") or "").strip().upper()
         nombre = (
             str(item.get("nombre_corto", "") or "").strip()
             or str(item.get("descripcion", "") or "").strip()
@@ -464,10 +471,44 @@ class Ingester:
         # SKU terminaba atribuido a la linea equivocada.
         cod_linea = linea_id or linea_code
         nom_linea = ""
-        if linea_nombre and linea_nombre != cod_linea:
+        if (
+            linea_nombre
+            and linea_nombre != cod_linea
+            or cod_linea
+            and linea_code == cod_linea
+            and linea_nombre
+        ):
             nom_linea = linea_nombre
-        elif cod_linea and linea_code == cod_linea and linea_nombre:
-            nom_linea = linea_nombre
+
+        # Prioridad para el parseo: el catalogo del API esta enriquecido
+        # (Render es la verdad). Se capturan todos los campos nuevos que
+        # el maestro publica, ademas de los clasicos. Los flags booleanos
+        # se normalizan a bool para que downstream pueda filtrar sin
+        # ambiguedad ("true"/"false" strings).
+        def _bool(key) -> bool | None:
+            v = item.get(key, None)
+            if v is None:
+                return None
+            if isinstance(v, bool):
+                return v
+            s = str(v).strip().lower()
+            if s in ("true", "1", "si", "yes"):
+                return True
+            if s in ("false", "0", "no"):
+                return False
+            return None
+
+        def _str(key) -> str:
+            return str(item.get(key, "") or "").strip()
+
+        keywords = item.get("keywords")
+        if not isinstance(keywords, list):
+            keywords = [str(keywords)] if keywords else []
+
+        almacenes = item.get("almacenes")
+        if not isinstance(almacenes, list):
+            almacenes = []
+
         return {
             # `linea_id` es la referencia de codigo del catalogo (v3.3.0).
             "linea_id": cod_linea,
@@ -475,14 +516,41 @@ class Ingester:
             "linea_nombre": nom_linea,
             "grupo": grupo_code,
             "grupo_nombre": grupo_nombre,
+            "grupo_id": str(item.get("grupo_id", "") or "").strip(),
+            "tipo": _str("tipo").upper(),
+            "tipo_id": str(item.get("tipo_id", "") or "").strip(),
+            "familia": _str("familia").upper(),
+            "familia_id": str(item.get("familia_id", "") or "").strip(),
             "categoria": str(item.get("categoria", "") or "").strip().upper(),
+            "categoria_venta": str(item.get("categoria_venta", "") or "").strip().upper(),
             "estado_linea": str(item.get("estado_linea", "") or "").strip().upper(),
             "un_bx": un_bx,
             "nombre_catalogo": nombre,
             # Metricas operativas: peso para capacidad de furgon y EAN para picking
             "peso_kg": _num("peso_kg"),
+            "precio_catalogo": _num("precio"),
+            "orden": int(_num("orden")) if _num("orden") else 0,
             "ean13": str(item.get("ean13", "") or "").strip(),
             "ean14": str(item.get("ean14", "") or "").strip(),
+            # Flags de estado del producto (Render es la verdad)
+            "sin_catalogo": _bool("sin_catalogo"),
+            "sin_stock": _bool("sin_stock"),
+            "descontinuado": _bool("descontinuado"),
+            "vigente": _bool("vigente"),
+            "compromiso": _bool("compromiso"),
+            "cotizable": _bool("cotizable"),
+            "por_activar": _bool("por_activar"),
+            "en_guia": _bool("en_guia"),
+            # Metadatos de origen/trazabilidad
+            "keywords": keywords,
+            "origen": _str("origen"),
+            "derivado_de": _str("derivado_de"),
+            "revision": _str("revision"),
+            # Detalle por almacen (nombre/tipo/stock/predespacho) para analisis
+            # de traslados y picking. Se conserva completo para futuras vistas.
+            "almacenes_detalle": almacenes,
+            "um": _str("um"),
+            "um_nombre": _str("um_nombre"),
         }
 
     @staticmethod
@@ -554,7 +622,9 @@ class Ingester:
             ("estado_linea", "estado_linea"),
             ("nombre_catalogo", "nombre_catalogo"),
         ]:
-            vals = mapped.apply(lambda d: (d or {}).get(source, "") if isinstance(d, dict) else "")
+            vals = mapped.apply(
+                lambda d, s=source: (d or {}).get(s, "") if isinstance(d, dict) else ""
+            )
             has = vals.astype(str).str.strip().ne("") & vals.notna()
             if target not in df.columns:
                 df[target] = ""
@@ -575,10 +645,10 @@ class Ingester:
             ("grupo", ["grupo"]),
         ]:
 
-            def _pick(d):
+            def _pick(d, srcs=sources):
                 if not isinstance(d, dict):
                     return ""
-                for s in sources:
+                for s in srcs:
                     v = str(d.get(s, "") or "").strip().upper()
                     if v:
                         return v
@@ -631,6 +701,94 @@ class Ingester:
             if target not in df.columns:
                 df[target] = ""
             df.loc[vals.ne(""), target] = vals[vals.ne("")]
+
+        # Campos enriquecidos nuevos del catalogo del API (Render es la verdad).
+        # Se aplican solo donde Render trae valor; el resto se conserva para
+        # no pisar datos previos (ERP / catalogo local) con vacios.
+        # --- strings (override si hay valor) ---
+        for target, source in [
+            ("familia", "familia"),
+            ("familia_id", "familia_id"),
+            ("tipo", "tipo"),
+            ("tipo_id", "tipo_id"),
+            ("grupo_id", "grupo_id"),
+            ("categoria_venta", "categoria_venta"),
+            ("um", "um"),
+            ("um_nombre", "um_nombre"),
+            ("origen", "origen"),
+            ("derivado_de", "derivado_de"),
+            ("revision", "revision"),
+        ]:
+            vals = mapped.apply(
+                lambda d, s=source: (
+                    str((d or {}).get(s, "") or "").strip() if isinstance(d, dict) else ""
+                )
+            )
+            has = vals.astype(str).str.strip().ne("")
+            if target not in df.columns:
+                df[target] = ""
+            df.loc[has, target] = vals[has].astype(str).str.strip()
+
+        # --- flags booleanos (override solo si Render los trae) ---
+        for target, source in [
+            ("sin_catalogo", "sin_catalogo"),
+            ("sin_stock", "sin_stock"),
+            ("descontinuado", "descontinuado"),
+            ("vigente", "vigente"),
+            ("compromiso", "compromiso"),
+            ("cotizable", "cotizable"),
+            ("por_activar", "por_activar"),
+            ("en_guia", "en_guia"),
+        ]:
+            vals = mapped.apply(
+                lambda d, s=source: (d or {}).get(s, None) if isinstance(d, dict) else None
+            )
+            # normalizar a bool donde Render trae valor
+            has = vals.notna()
+            # convertir True/False strings a bool
+            bool_vals = vals.map(
+                lambda v: (
+                    True
+                    if str(v).strip().lower() in ("true", "1", "si", "yes")
+                    else (False if str(v).strip().lower() in ("false", "0", "no") else None)
+                )
+            )
+            has = bool_vals.notna()
+            if target not in df.columns:
+                df[target] = None
+            df.loc[has, target] = bool_vals[has]
+
+        # --- orden (int) ---
+        vals_orden = mapped.apply(
+            lambda d: int((d or {}).get("orden", 0) or 0) if isinstance(d, dict) else 0
+        )
+        has_orden = vals_orden > 0
+        if "orden" not in df.columns:
+            df["orden"] = 0
+        df.loc[has_orden, "orden"] = vals_orden[has_orden]
+
+        # --- precio_catalogo (referencia; NO sobrescribe PRE_ARTICULO del ERP) ---
+        vals_precio = mapped.apply(
+            lambda d: (
+                float((d or {}).get("precio_catalogo", (d or {}).get("precio", 0)) or 0)
+                if isinstance(d, dict)
+                else 0.0
+            )
+        )
+        has_precio = vals_precio > 0
+        if "precio_catalogo" not in df.columns:
+            df["precio_catalogo"] = 0.0
+        df.loc[has_precio, "precio_catalogo"] = vals_precio[has_precio]
+
+        # --- keywords (lista) ---
+        vals_kw = mapped.apply(
+            lambda d: (d or {}).get("keywords", []) if isinstance(d, dict) else []
+        )
+        has_kw = vals_kw.apply(lambda x: isinstance(x, list) and len(x) > 0)
+        if "keywords" not in df.columns:
+            df["keywords"] = [[] for _ in range(len(df))]
+        df.loc[has_kw, "keywords"] = vals_kw[has_kw]
+
         return df
 
     @property
@@ -1338,7 +1496,6 @@ class Ingester:
         else:
             df["linea_cod"] = ""
             df["es_linea_valida"] = False
-        old_valid = None
         # Diagnostico: cuantas filas quedan fuera de la allowlist.
         self._linea_rechazadas = int((~df["es_linea_valida"].astype(bool)).sum())
         # Origen de la linea (trazabilidad para REVISAR_LINEA).
